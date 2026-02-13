@@ -1,5 +1,24 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   api:
     build: .
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     ports:
       - "8000:8000"
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+    command: ["rq", "worker", "-u", "redis://redis:6379"]
