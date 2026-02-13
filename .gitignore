@@ -1,0 +1,70 @@
+# ===== OS / Editor =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+pip-wheel-metadata/
+
+# ===== Virtual env =====
+.venv/
+venv/
+env/
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+
+# ===== Secrets =====
+.env
+.env.*.local
+*.key
+*.pem
+
+# ===== Logs =====
+*.log
+logs/
+
+# ===== Build / dist =====
+build/
+dist/
+*.egg-info/
+
+# ===== Large artifacts / outputs (common) =====
+output/
+outputs/
+data/
+tmp/
+temp/
+
+# ===== Model / vector db / runtime volumes =====
+qdrant_data/
+neo4j_data/
+minio_data/
+redis_data/
+storage/
+
+# ===== PDF / Images (optional) =====
+# 如果你確定「不需要把測試PDF一起交」，就保留忽略
+# 若要交 example.pdf，請把下面兩行註解掉
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# ===== Docker =====
+**/.docker/
+**/*.pid
+
+# ===== Node (if used later) =====
+node_modules/
