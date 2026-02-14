@@ -7,10 +7,12 @@
 
 功能包含：
 
-- 建立任務（POST /v1/jobs）
-- 背景非同步處理（Redis + RQ Worker）
-- 查詢任務狀態與結果（GET /v1/jobs/{job_id}）
-- 使用 Docker Compose 部署多服務架構
+- 建立任務（`POST /v1/jobs`）
+- 背景非同步處理（`Redis + RQ worker`）
+- 查詢任務狀態與結果（`GET /v1/jobs/{job_id}`）
+- 路由策略（`route=auto|ocr|vlm`）：支援自動判斷與強制指定
+- 失敗測試（輸入含 `please fail` → `failed`）
+- 真 API 連線測試資訊（`api_feedback` 回傳延遲/錯誤/timeout 等）
 
 ---
 
@@ -62,37 +64,80 @@ Request:
 
 ```json
 {
-  "text": "hello rq"
+  "text": "hello rq",
+  "route": "ocr"
+}
+```
+
+- route 可為：auto | ocr | vlm
+- 若不填，預設為 auto
+
+Response（完成時）：
+
+```json
+{
+  "job_id": "xxxx",
+  "status": "queued",
+  "queue": "default",
+  "route_request": "ocr",
+  "route_hint": {
+    "route": "ocr",
+    "confidence": 1.0,
+    "reason": "Route forced by request"
+  }
 }
 ```
 
 ### 2️⃣ 查詢任務狀態
 
 GET `/v1/jobs/{job_id}`
-Response（完成時）：
 
 ```json
 {
-  "job_id": "...",
+  "job_id": "xxxx",
   "status": "finished",
   "result": {
     "ok": true,
-    "echo": "hello rq",
-    "len": 8
-  }
+    "job_id": "xxxx",
+    "route_request": "auto",
+    "chosen_route": "ocr",
+    "route_hint": {
+      "route": "ocr",
+      "confidence": 0.75,
+      "reason": "Detected table/structured keywords"
+    },
+    "api_feedback": {
+      "mode": "real",
+      "route": "ocr",
+      "ok": true,
+      "latency_ms": 664,
+      "timeout_sec": 20,
+      "error": null
+    },
+    "payload": {
+      "engine": "ocr-api",
+      "raw": "..."
+    }
+  },
+  "error": null
 }
 ```
-狀態可能包含：
+失敗（failed）時範例：
 
-- queued
-- started
-- finished
-- failed
+```json
+{
+  "job_id": "xxxx",
+  "status": "failed",
+  "result": null,
+  "error": "Forced failure for testing"
+}
+```
 
 ## 五、啟動方式
 
 ```bash
-docker-compose up --build
+docker-compose up -d --build
+docker-compose ps
 ```
 
 啟動後可使用：
@@ -107,32 +152,61 @@ http://localhost:8000/docs
 
 建立任務：
 
+### A. OCR 路由（強制）
 ```bash
-curl -X POST "http://localhost:8000/v1/jobs" \
+curl -s -X POST "http://localhost:8000/v1/jobs" \
   -H "Content-Type: application/json" \
-  -d '{"text":"hello rq"}'
+  -d '{"text":"hello rq","route":"ocr"}'
 ```
+
+### B. VLM 路由（強制）
 查詢任務：
 
 ```bash
-curl "http://localhost:8000/v1/jobs/<job_id>"
+curl -s -X POST "http://localhost:8000/v1/jobs" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"這張圖請描述重點","route":"vlm"}'
+```
+### C. AUTO（由系統判斷）
+
+```bash
+curl -s -X POST "http://localhost:8000/v1/jobs" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"表格欄位：name/age/score，請轉成JSON","route":"auto"}'
 ```
 
-## 七、未來延伸方向
+### D. 失敗測試（應回 failed）
 
-本架構可擴充為：
+```bash
+curl -s -X POST "http://localhost:8000/v1/jobs" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"please fail","route":"ocr"}'
+```
 
-- 將背景任務替換為 OCR / LLM 推論流程
-- 增加任務分類（多模型 routing）
-- 加入 retry / timeout 機制
-- 接入資料庫儲存歷史任務
-- Kubernetes 部署升級
+### E. 查詢 job
 
-## 八、總結
+把 <job_id> 換成剛剛回傳的 job_id：
+```bash
+curl -s "http://localhost:8000/v1/jobs/<job_id>"
+```
 
-本專案成功建立：
+## 七、目前完成進度
 
-- 非同步任務 API
-- Redis Queue 架構
-- Worker 背景處理機制
-- Docker 多服務部署流程
+已完成：
+
+- 非同步架構（Redis + RQ）
+- 路由機制（auto / ocr / vlm）
+- chosen_route 回傳
+- route_hint 說明
+- api_feedback（真 API 測試資訊）
+- 失敗測試機制
+
+後續將整合：
+
+- EasyOCR（image）
+- Docling（PDF）
+- Gemma VLM（圖像理解）
+- 完整 IDP pipeline
+
+
+

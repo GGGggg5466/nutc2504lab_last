@@ -19,6 +19,12 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - USE_REAL_API=1
+      - API_HEALTHCHECK=1
+      - OCR_API_URL=https://ws-01-olmocr.huannago.com/v1/chat/completions
+      - OCR_MODEL=allenai/olmOCR-2-7B-1025-FP8
+      - VLM_API_URL=https://ws-06.huannago.com/v1/chat/completions
+      - VLM_MODEL=gemma-3-27b-it
     depends_on:
       - redis
-    command: ["rq", "worker", "-u", "redis://redis:6379"]
+    command: ["rq", "worker", "-u", "redis://redis:6379", "default"]
