@@ -1,9 +1,10 @@
 from pydantic import BaseModel
 from typing import Any, Optional
-from .state import JobStatus, Route
+from .state import JobStatus, Route, InputType
 
 class CreateJobRequest(BaseModel):
     text: str
+    input_type: InputType = InputType.text
     route: Route = Route.auto   # auto/ocr/vlm
 
 class CreateJobResponse(BaseModel):
@@ -22,3 +23,5 @@ class GetJobResponse(BaseModel):
     status: JobStatus
     result: Optional[Any] = None
     error: Optional[str] = None
+
+

@@ -10,3 +10,10 @@ class Route(str, Enum):
     auto = "auto"
     ocr = "ocr"
     vlm = "vlm"
+    pipeline = "pipeline"
+
+class InputType(str, Enum):
+    text = "text"
+    image = "image"
+    pdf = "pdf"
+

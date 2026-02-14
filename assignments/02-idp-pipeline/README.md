@@ -3,7 +3,8 @@
 ## 一、專案目標
 
 本作業實作一個最小可運作（MVP）的非同步任務處理 API，
-建立後續 AI 推論流程（OCR / VLM / NLP）的基礎架構。
+建立完整 Intelligent Document Processing (IDP) 流水線基礎架構，
+支援 OCR → VLM → Normalize → Chunk 的可擴充式處理流程。
 
 功能包含：
 
@@ -65,11 +66,13 @@ Request:
 ```json
 {
   "text": "hello rq",
-  "route": "ocr"
+  "input_type": "text",
+  "route": "auto"
 }
 ```
 
-- route 可為：auto | ocr | vlm
+- input_type 可為：text | image | pdf
+- route 可為：auto | ocr | vlm | pipeline
 - 若不填，預設為 auto
 
 Response（完成時）：
@@ -133,6 +136,20 @@ GET `/v1/jobs/{job_id}`
 }
 ```
 
+### 3️⃣ Pipeline 模式（IDP 完整流程）
+
+當 route 設為 `pipeline` 時，會啟用完整文件處理流程：
+
+- image → OCR → VLM → Normalize → Chunk
+- pdf → Docling → VLM → Normalize → Chunk
+- text → VLM → Normalize → Chunk
+
+回傳結果將包含：
+
+- stages：執行階段
+- normalized：抽取後的 JSON object
+- chunks：切塊結果（RAG-ready）
+
 ## 五、啟動方式
 
 ```bash
@@ -190,23 +207,47 @@ curl -s -X POST "http://localhost:8000/v1/jobs" \
 curl -s "http://localhost:8000/v1/jobs/<job_id>"
 ```
 
+### F. Image（OCR stub）
+
+```bash
+curl -s -X POST "http://localhost:8000/v1/jobs" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"/data/test.jpg","input_type":"image","route":"ocr"}'
+```
+
+### G. Pipeline 模式（完整 IDP）
+
+```bash
+curl -s -X POST "http://localhost:8000/v1/jobs" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"/data/test.jpg","input_type":"image","route":"pipeline"}'
+```
+
 ## 七、目前完成進度
 
 已完成：
 
-- 非同步架構（Redis + RQ）
-- 路由機制（auto / ocr / vlm）
-- chosen_route 回傳
-- route_hint 說明
-- api_feedback（真 API 測試資訊）
-- 失敗測試機制
+- 非同步架構（Redis + RQ worker）
+- Job 狀態管理（queued / started / finished / failed）
+- 路由機制（auto / ocr / vlm / pipeline）
+- input_type 支援（text / image / pdf）
+- EasyOCR / Docling stub 整合
+- 真實 VLM API 串接
+- api_feedback（延遲、錯誤、timeout 資訊）
+- JSON 正規化抽取（extract_json）
+- Chunking（RAG-ready 切塊）
+- 失敗測試機制（please fail）
+- Job timeout + retry 機制
 
-後續將整合：
+## 八、未來擴充
 
-- EasyOCR（image）
-- Docling（PDF）
-- Gemma VLM（圖像理解）
-- 完整 IDP pipeline
+後續規劃：
+
+- 接入真實 EasyOCR 與 Docling
+- 支援圖像 base64 / multipart 上傳
+- 將 chunks 寫入向量資料庫（Qdrant）
+- 將 entities 寫入圖資料庫（Neo4j）
+- GraphRAG 整合
 
 
 

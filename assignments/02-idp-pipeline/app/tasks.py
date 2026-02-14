@@ -1,6 +1,8 @@
 import os
 import time
 import inspect
+import json
+import re
 from typing import Any, Dict, Optional, Tuple
 
 from rq import get_current_job
@@ -112,49 +114,84 @@ def _call_with_feedback(fn, *, route: str, text: str, timeout: int) -> Tuple[Opt
 # =========================
 #  RQ Worker Job
 # =========================
-def run_job(text: str, route: str):
+def run_job(text: str, route: str, input_type: str = "text"):
     """
     RQ worker 執行的 job
 
     - route: "auto" | "ocr" | "vlm"
-    - text: 目前同時拿來當文字輸入/或檔案路徑（pdf/image）用
-      （更正式的做法：schema 增加 input_type / file_path）
+    - input_type: "text" | "image" | "pdf"  （由 API 明確傳入；若沒傳或不合法會 fallback）
+    - text: 目前仍沿用：
+        - text=input文字
+        - image/pdf 時 text 放檔案路徑（例如 /data/a.jpg, /data/a.pdf）
     """
     job = get_current_job()
     job_id = job.id if job else None
 
-    # ✅ set_status / set_result / set_error 都要用 (redis_conn, job_id, value)
     set_status(redis_conn, job_id, JobStatus.started.value)
 
     try:
-        # 0) failure 測試（你要的失敗案例）
+        # 0) failure 測試
         if "please fail" in (text or "").lower():
             raise RuntimeError("Forced failure for testing")
+        
+        # 1) route enum
+        route_enum = Route(route)  # "auto"/"ocr"/"vlm"
 
-        # 1) 決策：route_enum + chosen_route + route_hint
-        route_enum = Route(route)  # 若非法會直接丟例外（API 已用 enum 擋過通常不會）
+        # 2) input_type：以 API 傳入為準，不合法就 fallback
+        input_type = (input_type or "text").strip().lower()
+        if input_type not in ("text", "image", "pdf"):
+            input_type = "text"
+
+        # （可選備援：如果你想保留自動推測）
+        # inferred_type, inferred_path = infer_input_type(text)
+        # if input_type == "text" and inferred_type in ("image", "pdf"):
+        #     input_type = inferred_type
+
+        # 3) route 決策（修正 decide_route：它回傳 tuple，不是 dict）
         if route_enum == Route.auto:
-            route_hint = decide_route(text)  # e.g. {"route":"ocr","confidence":0.75,"reason":"..."}
-            chosen_route = route_hint["route"]
+            hint_route, hint_conf, hint_reason = decide_route(text)
+            route_hint = {
+                "route": hint_route.value,
+                "confidence": hint_conf,
+                "reason": hint_reason,
+            }
+
+            # ✅ Day3 MVP：若是 image/pdf，auto 先強制走 OCR（最穩交付）
+            if input_type in ("image", "pdf"):
+                chosen_route = "ocr"
+                route_hint = {
+                    "route": "ocr",
+                    "confidence": 0.90,
+                    "reason": f"Forced OCR for {input_type} in Day3 MVP",
+                }
+            else:
+                chosen_route = hint_route.value
         else:
-            route_hint = {"route": route_enum.value, "confidence": 1.0, "reason": "Route forced by request"}
+            route_hint = {
+                "route": route_enum.value,
+                "confidence": 1.0,
+                "reason": "Route forced by request",
+            }
             chosen_route = route_enum.value
 
-        # 2) 決定 input_type（image/pdf/text）
-        input_type, path = infer_input_type(text)
-
-        # 3) 執行：依 chosen_route + input_type 分流
+        # 4) 依 chosen_route + input_type 分流
         api_feedback: Dict[str, Any] = {"mode": "local", "ok": True, "error": None}
         payload: Any = None
 
+        # A 方案：image/pdf 的路徑仍放在 text
+        path = (text or "").strip()
+
         if chosen_route == "ocr":
-            # OCR：image -> EasyOCR、pdf -> Docling、text -> OCR API/Mock
             if input_type == "image":
-                payload = run_easyocr(path)  # 本地 OCR（先 stub）
+                if not path:
+                    raise RuntimeError("input_type=image but empty path/text")
+                payload = run_easyocr(path)  # stub (之後換真 EasyOCR)
                 api_feedback = {"mode": "local", "route": "easyocr", "ok": True, "latency_ms": 0, "error": None}
 
             elif input_type == "pdf":
-                payload = run_docling(path)  # 本地 Docling（先 stub）
+                if not path:
+                    raise RuntimeError("input_type=pdf but empty path/text")
+                payload = run_docling(path)  # stub (之後換真 Docling)
                 api_feedback = {"mode": "local", "route": "docling", "ok": True, "latency_ms": 0, "error": None}
 
             else:
@@ -170,8 +207,7 @@ def run_job(text: str, route: str):
                     api_feedback = {"mode": "mock", "route": "ocr", "ok": True, "latency_ms": 0, "error": None}
 
         elif chosen_route == "vlm":
-            # VLM：目前先用 text/prompt 方式示範
-            # 真正要把圖片丟給 VLM：你後面要把 call_vlm 改成支援 image input（base64/multipart）
+            # Day3 MVP：先維持你現有 VLM 介面（text prompt）
             if USE_REAL_API:
                 payload, api_feedback = _call_with_feedback(
                     call_vlm, route="vlm", text=text, timeout=DEFAULT_TIMEOUT_SEC
@@ -181,11 +217,77 @@ def run_job(text: str, route: str):
             else:
                 payload = mock_vlm(text)
                 api_feedback = {"mode": "mock", "route": "vlm", "ok": True, "latency_ms": 0, "error": None}
+        
+        elif chosen_route == "pipeline":
+
+            stages = []
+            intermediate_text = text
+
+            # 1️⃣ OCR / Docling 階段
+            if input_type == "image":
+                stages.append("ocr")
+                ocr_payload = run_easyocr(text)
+                intermediate_text = ocr_payload.get("extracted_text", "")
+            elif input_type == "pdf":
+                stages.append("ocr")
+                doc_payload = run_docling(text)
+                intermediate_text = doc_payload.get("text", "")
+
+            # 2️⃣ VLM 階段
+            stages.append("vlm")
+
+            if USE_REAL_API:
+                vlm_payload, err = call_vlm(intermediate_text)
+                if err:
+                    raise RuntimeError(err)
+            else:
+                vlm_payload = mock_vlm(intermediate_text)
+
+            raw_text = vlm_payload.get("caption") or vlm_payload.get("text") or ""
+
+            # 3️⃣ 正規化
+            stages.append("normalize")
+
+            normalized = {
+                "content_text": raw_text,
+                "content_json": extract_json_obj(raw_text),
+            }
+
+            # 4️⃣ Chunk
+            stages.append("chunk")
+
+            chunk_size = 300
+            overlap = 50
+
+            chunks = []
+            start = 0
+            idx = 0
+            while start < len(raw_text):
+                end = start + chunk_size
+                chunk_text = raw_text[start:end]
+                chunks.append({"i": idx, "text": chunk_text})
+                idx += 1
+                start = end - overlap
+
+            payload = {
+                "stages": stages,
+                "ocr_text": intermediate_text if input_type in ("image","pdf") else None,
+                "normalized": normalized,
+                "chunks": chunks,
+                "raw": vlm_payload,
+            }
+
+            api_feedback = {
+                "mode": "pipeline",
+                "route": "pipeline",
+                "ok": True,
+                "error": None,
+            }
 
         else:
             raise ValueError(f"Unknown chosen_route: {chosen_route}")
 
-        # 4) 組結果（你要的欄位：route_request/chosen_route/route_hint/api_feedback）
+        # 5) 組結果
         result = {
             "ok": True,
             "job_id": job_id,
@@ -203,8 +305,60 @@ def run_job(text: str, route: str):
         return result
 
     except Exception as e:
-        # ✅ Redis 不能塞 dict，error 統一存字串
         err_msg = str(e)
         set_error(redis_conn, job_id, err_msg)
         set_status(redis_conn, job_id, JobStatus.failed.value)
         raise
+
+def extract_json_obj(text: str) -> Optional[Dict[str, Any]]:
+    """
+    嘗試從 LLM/VLM 回傳的 content 中抽出「第一個可 parse 的 JSON object」。
+
+    支援情境：
+    1) ```json ... ``` code fence
+    2) 文字中夾雜 JSON：抓第一個 '{' 到最後一個 '}'（並做簡單清理）
+    3) content 本身就是 JSON
+
+    成功回傳 dict，失敗回 None
+    """
+    if not text:
+        return None
+
+    s = text.strip()
+
+    # Case 1: ```json ... ```
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, flags=re.DOTALL | re.IGNORECASE)
+    if fence:
+        candidate = fence.group(1).strip()
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+
+    # Case 2: 直接就是 JSON
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    # Case 3: 文字中夾雜 JSON，抓最大包圍
+    l = s.find("{")
+    r = s.rfind("}")
+    if l != -1 and r != -1 and r > l:
+        candidate = s[l : r + 1].strip()
+
+        # 簡單清理：去掉可能的前綴 "json\n{...}"
+        candidate = re.sub(r"^\s*json\s*", "", candidate, flags=re.IGNORECASE)
+
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+
+    return None
