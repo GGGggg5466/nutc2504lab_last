@@ -5,3 +5,6 @@ rq==1.16.2
 requests
 easyocr
 torch
+qdrant-client
+sentence-transformers
+numpy

@@ -9,13 +9,14 @@ def _post_json(url: str, payload: Dict[str, Any], timeout: int = 60) -> Dict[str
     return r.json()
 
 
-def call_ocr(text: str) -> Tuple[Dict[str, Any], Optional[str]]:
+def call_ocr(text: str, timeout: int = 60) -> Tuple[Dict[str, Any], Optional[str]]:
     """
     Return: (payload, error)
     payload: normalized OCR result
     """
     url = os.getenv("OCR_API_URL", "").strip()
     model = os.getenv("OCR_MODEL", "").strip()
+    
 
     if not url:
         return {}, "OCR_API_URL is empty"
@@ -31,7 +32,7 @@ def call_ocr(text: str) -> Tuple[Dict[str, Any], Optional[str]]:
     }
 
     try:
-        raw = _post_json(url, req, timeout=90)
+        raw = _post_json(url, req, timeout=timeout)
         # 你可以先用最保守方式抽文字（依常見格式）
         content = (
             raw.get("choices", [{}])[0]
@@ -48,7 +49,7 @@ def call_ocr(text: str) -> Tuple[Dict[str, Any], Optional[str]]:
         return {}, f"OCR call failed: {e}"
 
 
-def call_vlm(text: str) -> Tuple[Dict[str, Any], Optional[str]]:
+def call_vlm(text: str, timeout: int = 60) -> Tuple[Dict[str, Any], Optional[str]]:
     url = os.getenv("VLM_API_URL", "").strip()
     model = os.getenv("VLM_MODEL", "").strip()
 
@@ -65,7 +66,7 @@ def call_vlm(text: str) -> Tuple[Dict[str, Any], Optional[str]]:
     }
 
     try:
-        raw = _post_json(url, req, timeout=90)
+        raw = _post_json(url, req, timeout=timeout)
         content = (
             raw.get("choices", [{}])[0]
             .get("message", {})
@@ -78,3 +79,12 @@ def call_vlm(text: str) -> Tuple[Dict[str, Any], Optional[str]]:
         }, None
     except Exception as e:
         return {}, f"VLM call failed: {e}"
+    
+def _normalize_chat_url(url: str) -> str:
+    url = url.rstrip("/")
+    if url.endswith("/v1/chat/completions"):
+        return url
+    if url.endswith("/v1"):
+        return url + "/chat/completions"
+    # 常見：只給 base，例如 http://xxx:8000
+    return url + "/v1/chat/completions"

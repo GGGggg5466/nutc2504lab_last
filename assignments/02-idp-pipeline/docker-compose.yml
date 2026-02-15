@@ -28,3 +28,13 @@ services:
     depends_on:
       - redis
     command: ["rq", "worker", "-u", "redis://redis:6379", "default"]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  qdrant_data:

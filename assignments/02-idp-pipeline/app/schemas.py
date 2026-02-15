@@ -23,5 +23,3 @@ class GetJobResponse(BaseModel):
     status: JobStatus
     result: Optional[Any] = None
     error: Optional[str] = None
-
-

@@ -68,4 +68,3 @@ def get_job(job_id: str):
     error = get_error(redis_conn, job_id) if status == JobStatus.failed.value else None
 
     return GetJobResponse(job_id=job_id, status=status, result=result, error=error)
-
