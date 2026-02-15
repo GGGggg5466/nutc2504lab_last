@@ -1,10 +1,10 @@
-import os
+import os, requests, uuid
 import time
 import inspect
 import json
 import re
 from typing import Any, Dict, Optional, Tuple
-
+from hashlib import sha256
 from rq import get_current_job
 
 from .queue import redis_conn, set_status, set_result, set_error
@@ -13,10 +13,15 @@ from .router import decide_route
 
 # 你原本的 client / mock
 from app.clients.model_api import call_ocr, call_vlm
+from app.clients.embedding import embed_texts
+from app.clients.qdrant_client import get_qdrant, ensure_collection, upsert_points
 from app.mocks import mock_ocr, mock_vlm
+
+from qdrant_client.http.models import PointStruct
 
 DEFAULT_TIMEOUT_SEC = int(os.getenv("DEFAULT_TIMEOUT_SEC", "20"))
 USE_REAL_API = os.getenv("USE_REAL_API", "0") == "1"
+COLLECTION = os.getenv("QDRANT_COLLECTION", "idp_chunks")
 
 
 # =========================
@@ -56,7 +61,7 @@ def run_docling(pdf_path: str) -> Dict[str, Any]:
     return {
         "engine": "docling-stub",
         "pdf_path": pdf_path,
-        "text": f"[DOC FROM {pdf_path}]",
+        "text": f"[DOC FROM {pdf_path}]\nThis is a PDF test document. ...",
         "tables": [],
     }
 
@@ -77,39 +82,51 @@ def run_easyocr(image_path: str) -> Dict[str, Any]:
 # =========================
 #  API Call With Feedback
 # =========================
-def _call_with_feedback(fn, *, route: str, text: str, timeout: int) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+def _call_with_feedback(fn, route: str, text: str, timeout: int):
     """
-    統一包裝：回傳 (payload, api_feedback)
+    统一封装：调用外部 API，并回传 (payload, api_feedback)
 
-    - 自動判斷 fn 是否支援 timeout 參數，避免 TypeError
-    - 捕捉例外，api_feedback 會帶 error
+    兼容两种 fn 回传格式：
+    1) payload
+    2) (payload, error_str)   <-- model_api.call_vlm/call_ocr
     """
     t0 = time.time()
     payload = None
     err = None
 
     try:
-        sig = inspect.signature(fn)
-        if "timeout" in sig.parameters:
-            payload = fn(text=text, timeout=timeout)
+        result = fn(text=text, timeout=timeout)
+
+        # ✅ 兼容 (payload, err) 形式
+        if isinstance(result, tuple) and len(result) == 2:
+            payload, err = result
         else:
-            # 你的 call_ocr/call_vlm 若只吃 text，就走這條
-            payload = fn(text=text)
+            payload = result
+            err = None
+
+    except requests.Timeout:
+        payload = None
+        err = "timeout"
     except Exception as e:
+        payload = None
         err = str(e)
 
     latency_ms = int((time.time() - t0) * 1000)
 
     api_feedback = {
-        "mode": "real",
+        "mode": "real" if USE_REAL_API else "mock",
         "route": route,
-        "ok": payload is not None and err is None,
+        "ok": (payload is not None) and (not err),
         "latency_ms": latency_ms,
-        "timeout_sec": timeout,
         "error": err,
     }
+
     return payload, api_feedback
 
+def get_vlm_text(v: dict) -> str:
+    if not isinstance(v, dict):
+        return ""
+    return v.get("caption") or v.get("text") or ""
 
 # =========================
 #  RQ Worker Job
@@ -135,7 +152,7 @@ def run_job(text: str, route: str, input_type: str = "text"):
             raise RuntimeError("Forced failure for testing")
         
         # 1) route enum
-        route_enum = Route(route)  # "auto"/"ocr"/"vlm"
+        route_enum = Route(route)  # "auto"/"ocr"/"vlm"/"pipeline"
 
         # 2) input_type：以 API 傳入為準，不合法就 fallback
         input_type = (input_type or "text").strip().lower()
@@ -182,6 +199,7 @@ def run_job(text: str, route: str, input_type: str = "text"):
         path = (text or "").strip()
 
         if chosen_route == "ocr":
+
             if input_type == "image":
                 if not path:
                     raise RuntimeError("input_type=image but empty path/text")
@@ -207,43 +225,64 @@ def run_job(text: str, route: str, input_type: str = "text"):
                     api_feedback = {"mode": "mock", "route": "ocr", "ok": True, "latency_ms": 0, "error": None}
 
         elif chosen_route == "vlm":
-            # Day3 MVP：先維持你現有 VLM 介面（text prompt）
+            # ✅ Day3/Day4: VLM route (text prompt) + normalize JSON
             if USE_REAL_API:
-                payload, api_feedback = _call_with_feedback(
+                vlm_payload, api_feedback = _call_with_feedback(
                     call_vlm, route="vlm", text=text, timeout=DEFAULT_TIMEOUT_SEC
                 )
-                if payload is None:
+                if vlm_payload is None:
                     raise RuntimeError(f"VLM API call failed: {api_feedback.get('error')}")
             else:
-                payload = mock_vlm(text)
+                vlm_payload = mock_vlm(text)
                 api_feedback = {"mode": "mock", "route": "vlm", "ok": True, "latency_ms": 0, "error": None}
+
+            raw_caption = (vlm_payload or {}).get("caption", "")
+            normalized = extract_json_obj(raw_caption)
+
+            payload = {
+                "engine": "vlm-api",
+                "raw": (vlm_payload or {}).get("raw") if isinstance(vlm_payload, dict) else vlm_payload,
+                "raw_caption": raw_caption,
+                "normalized": normalized,  # dict 或 None
+            }
         
         elif chosen_route == "pipeline":
 
             stages = []
             intermediate_text = text
 
+            extracted_text = None
+            ocr_text = None
+            
+            if input_type in ("image", "pdf") and not path:
+                raise RuntimeError(f"input_type={input_type} but empty path/text")
+            
+
             # 1️⃣ OCR / Docling 階段
             if input_type == "image":
                 stages.append("ocr")
-                ocr_payload = run_easyocr(text)
-                intermediate_text = ocr_payload.get("extracted_text", "")
+                ocr_payload = run_easyocr(path)
+                ocr_text = ocr_payload.get("extracted_text", "")
+                extracted_text = ocr_text
+                intermediate_text = extracted_text
+
             elif input_type == "pdf":
                 stages.append("ocr")
-                doc_payload = run_docling(text)
-                intermediate_text = doc_payload.get("text", "")
+                doc_payload = run_docling(path)
+                extracted_text = doc_payload.get("text", "")
+                intermediate_text = extracted_text
 
             # 2️⃣ VLM 階段
             stages.append("vlm")
 
             if USE_REAL_API:
-                vlm_payload, err = call_vlm(intermediate_text)
-                if err:
-                    raise RuntimeError(err)
+                vlm_payload, fb = _call_with_feedback(call_vlm, route="vlm", text=intermediate_text, timeout=DEFAULT_TIMEOUT_SEC)
+                if vlm_payload is None:
+                    raise RuntimeError(f"VLM API call failed: {fb.get('error')}")
             else:
                 vlm_payload = mock_vlm(intermediate_text)
 
-            raw_text = vlm_payload.get("caption") or vlm_payload.get("text") or ""
+            raw_text = get_vlm_text(vlm_payload)
 
             # 3️⃣ 正規化
             stages.append("normalize")
@@ -267,14 +306,60 @@ def run_job(text: str, route: str, input_type: str = "text"):
                 chunk_text = raw_text[start:end]
                 chunks.append({"i": idx, "text": chunk_text})
                 idx += 1
-                start = end - overlap
+                start = max(0, end - overlap)
+                if start >= len(raw_text):
+                    break
+
+            # 5️⃣ Embed + Index (Day4)
+            stages.append("embed")
+
+            texts = [c["text"] for c in chunks]
+            vectors = embed_texts(texts)  # List[List[float]]
+            dim = len(vectors[0]) if vectors else 0
+
+            stages.append("index")
+
+            qdrant = get_qdrant()
+            ensure_collection(qdrant, COLLECTION, dim=dim)
+
+            # doc_id：用 input（例如檔案路徑）+ job_id 生成一個可追溯 id（最小 lineage）
+            doc_seed = f"{job_id}:{path}:{input_type}"
+            doc_id = sha256(doc_seed.encode("utf-8")).hexdigest()[:16]
+            DOC_NS = uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+            points = []
+            for c, v in zip(chunks, vectors):
+                chunk_id = str(uuid.uuid5(DOC_NS, f"{doc_id}:{c['i']}"))
+                points.append(
+                    PointStruct(
+                        id=chunk_id,
+                        vector=v,
+                        payload={
+                            "doc_id": doc_id,
+                            "job_id": job_id,
+                            "chunk_index": c["i"],
+                            "input_type": input_type,
+                            "source": path,
+                            "text": c["text"],
+                            "pipeline_version": "v1",
+                        },
+                    )
+                )
+
+            upsert_points(qdrant, COLLECTION, points)
 
             payload = {
                 "stages": stages,
-                "ocr_text": intermediate_text if input_type in ("image","pdf") else None,
+                "ocr_text": ocr_text,
+                "extracted_text": extracted_text,
                 "normalized": normalized,
                 "chunks": chunks,
                 "raw": vlm_payload,
+                "lineage": {
+                    "doc_id": doc_id,
+                    "pipeline_version": "v1",
+                    "qdrant": {"collection": COLLECTION, "points": len(points), "dim": dim},
+                },
             }
 
             api_feedback = {
@@ -362,3 +447,4 @@ def extract_json_obj(text: str) -> Optional[Dict[str, Any]]:
             return None
 
     return None
+

@@ -16,4 +16,3 @@ class InputType(str, Enum):
     text = "text"
     image = "image"
     pdf = "pdf"
-

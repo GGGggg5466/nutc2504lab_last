@@ -14,6 +14,9 @@
 - 路由策略（`route=auto|ocr|vlm`）：支援自動判斷與強制指定
 - 失敗測試（輸入含 `please fail` → `failed`）
 - 真 API 連線測試資訊（`api_feedback` 回傳延遲/錯誤/timeout 等）
+- Pipeline 模式（route=pipeline）：串起 OCR/Docling → VLM → Normalize → Chunk → Embed → Index
+- input_type 支援（text / image / pdf）
+- 向量化與索引（embed/index）：chunks 寫入 Qdrant（Vector DB）
 
 ---
 
@@ -38,11 +41,14 @@ Redis（儲存結果）
 ▼  
 FastAPI 回傳任務狀態與結果  
 
+補充：RQ Worker 在處理流程的最後階段（embed/index）會把 chunk 向量寫入 Qdrant，供後續 RAG/檢索使用。
+
 服務包含：
 
 - api
 - worker
 - redis
+- qdrant（Vector DB：保存 chunk embeddings 與 payload）
 
 ---
 
@@ -52,6 +58,8 @@ FastAPI 回傳任務狀態與結果
 - Redis：任務佇列與結果儲存
 - RQ：輕量級非同步任務處理框架
 - Docker Compose：多服務統一部署
+- Qdrant：向量資料庫（保存 chunk embeddings 與檢索 payload）
+- SentenceTransformers：產生 embeddings（供 Qdrant indexing）
 
 ---
 
@@ -75,7 +83,7 @@ Request:
 - route 可為：auto | ocr | vlm | pipeline
 - 若不填，預設為 auto
 
-Response（完成時）：
+Response（立即回傳；job 進入 queued）：
 
 ```json
 {
@@ -167,6 +175,8 @@ http://localhost:8000/docs
 
 ## 六、測試流程
 
+> 注意：route 與 input_type 請一律使用小寫（auto/ocr/vlm/pipeline；text/image/pdf），避免 enum 驗證失敗。
+
 建立任務：
 
 ### A. OCR 路由（強制）
@@ -238,16 +248,17 @@ curl -s -X POST "http://localhost:8000/v1/jobs" \
 - Chunking（RAG-ready 切塊）
 - 失敗測試機制（please fail）
 - Job timeout + retry 機制
+- Embedding（產生 chunk 向量）
+- Indexing（寫入 Qdrant：collection=idp_chunks）
 
 ## 八、未來擴充
 
 後續規劃：
 
-- 接入真實 EasyOCR 與 Docling
 - 支援圖像 base64 / multipart 上傳
-- 將 chunks 寫入向量資料庫（Qdrant）
 - 將 entities 寫入圖資料庫（Neo4j）
 - GraphRAG 整合
-
+- Docling 真實整合（layout/table parsing；目前為 stub）
+- EasyOCR 真實整合（目前為 stub）
 
 
