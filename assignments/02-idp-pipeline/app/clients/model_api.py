@@ -88,3 +88,38 @@ def _normalize_chat_url(url: str) -> str:
         return url + "/chat/completions"
     # 常見：只給 base，例如 http://xxx:8000
     return url + "/v1/chat/completions"
+
+def call_llm(prompt: str, timeout: int = 60) -> Tuple[str, Optional[str]]:
+    """
+    Return: (answer_text, error)
+    - 若 LLM_URL / LLM_API_URL 沒設，回傳 error
+    - 預設使用 OpenAI-compatible /v1/chat/completions
+    """
+    # 兼容你前面提過的 LLM_URL，也兼容與 OCR/VLM 一樣的 LLM_API_URL
+    url = (os.getenv("LLM_URL", "") or os.getenv("LLM_API_URL", "")).strip()
+    model = os.getenv("LLM_MODEL", "").strip()
+
+    if not url:
+        return "", "LLM_URL (or LLM_API_URL) is empty"
+
+    url = _normalize_chat_url(url)
+
+    req = {
+        "model": model or "unknown",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant. Answer the user with citations if provided."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+    }
+
+    try:
+        raw = _post_json(url, req, timeout=timeout)
+        content = (
+            raw.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+        return content, None
+    except Exception as e:
+        return "", f"LLM call failed: {e}"

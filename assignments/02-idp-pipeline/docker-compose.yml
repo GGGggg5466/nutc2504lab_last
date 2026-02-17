@@ -9,10 +9,16 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - FTS_DB_PATH=/app/data/fts.db
+      - RERANK_URL=http://rerank:9001/rerank
+      - LLM_API_URL=https://ws-03.wade0426.me/v1/chat/completions
+      - LLM_MODEL=/models/Qwen3-30B-A3B-Instruct-2507-FP8
     ports:
       - "8000:8000"
     depends_on:
       - redis
+    volumes:
+    - ./data:/app/data
 
   worker:
     build: .
@@ -35,6 +41,19 @@ services:
       - "6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
+  
+  rerank:
+    image: python:3.11-slim
+    working_dir: /srv
+    volumes:
+      - .:/srv
+    command: >
+      sh -lc "pip install --no-cache-dir fastapi uvicorn pydantic &&
+              uvicorn rerank_service:app --host 0.0.0.0 --port 9001"
+    ports:
+      - "9001:9001"
 
 volumes:
   qdrant_data:
+
+  
